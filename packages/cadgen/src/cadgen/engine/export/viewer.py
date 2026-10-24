@@ -13,7 +13,7 @@ from pathlib import Path
 
 def fingerprint(structure: dict) -> str:
     """Content identity of a live document, independent of its served address/version."""
-    fields = ("name", "units", "prototypes", "instances", "tree", "kinematics")
+    fields = ("name", "units", "prototypes", "instances", "tree", "kinematics", "pmi")
     return hashlib.sha256(json.dumps({k: structure.get(k) for k in fields},
                                     sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -33,25 +33,41 @@ def check(source, expected: dict) -> None:
 
 
 def options(source, *, pose=None, part=None, original_allowed=True) -> list[dict]:
+    from cadgen.engine import pmi
     from cadgen.engine.export import ExportRefused
     from cadgen.engine.export.dxf import dxf_bytes
 
     view = source.view(pose=pose, part=part)
     rows = [{"format": kind, "label": label, "extension": extension, "reason": None}
-            for kind, label, extension in (("step", "STEP", ".step"), ("glb", "GLB", ".glb"),
+            for kind, label, extension in (("step", "STEP (AP242)", ".step"), ("glb", "GLB", ".glb"),
                                            ("stl", "STL", ".stl"), ("threemf", "3MF", ".3mf"),
                                            ("dxf", "DXF", ".dxf"), ("xbf", "XBF", ".xbf"))]
     for row in rows:
+        if row["format"] == "step":
+            row["pmi"] = bool(source.structure.get("pmi"))
+            try:
+                pmi.refuse_dropped(view, "step")
+            except ExportRefused as error:
+                row["reason"] = str(error)
         if row["format"] == "dxf":
             try:
                 dxf_bytes(view)
             except ExportRefused as error:
                 row["reason"] = str(error)
         if row["format"] == "xbf":
+            # Whether the PMI decided this row: only an XBF made again, a part extracted or a
+            # document converted, is one.
+            row["pmi"] = False
             if pose is not None:
                 row["reason"] = "XBF stores the authored document, not a requested pose."
             elif source.path and source.path.suffix.lower() == ".xbf" and part is None and not source.foreign:
                 row["reason"] = "Use Download original XBF, or select a part to extract."
+            else:
+                row["pmi"] = bool(source.structure.get("pmi"))
+                try:
+                    pmi.refuse_dropped(view, "xbf")
+                except ExportRefused as error:
+                    row["reason"] = str(error)
     if original_allowed and source.path and source.path.suffix.lower() == ".xbf" and part is None and pose is None:
         rows.append({"format": "original", "label": "Download original XBF", "extension": ".xbf", "reason": None})
     return rows

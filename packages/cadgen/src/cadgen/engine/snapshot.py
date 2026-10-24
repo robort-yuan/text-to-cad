@@ -23,7 +23,10 @@ The request is the snapshot contract's where it applies (``--display`` mode or J
 refused by name before anything renders: ``parts`` and ``exploded`` for a file that places a single
 part, ``--pose`` for a mesh, and everything but ``appearance`` for a drawing. ``--display
 exploded=0.6`` (or ``display.exploded``) moves the parts apart as the viewer's Explode does, by its
-amount (0.5 unless one is given). ``--annotation FILE`` draws the viewer's annotation over the
+amount (0.5 unless one is given). A document's PMI is drawn as the viewer shows it, on the parts
+as made (``render/pmi.py``); ``pmi=off`` (``display.pmi`` false) draws none, and asking for it
+(``pmi`` or ``pmi=on``, ``display.pmi`` true) of a document that carries none, or exploded, posed or
+in Preview, is refused by name. ``--annotation FILE`` draws the viewer's annotation over the
 model (its ink on the parts it was drawn on, wherever they stand): an annotation file, or the Quick
 Edit packet that carries one (a ``.snapshot.json``). ``--measurements FILE`` draws Measure's
 dimensions. ``--camera authored`` draws the picture from the view the ink was drawn in, exactly
@@ -67,7 +70,7 @@ __all__ = ["SnapshotRefused", "Still", "add_parser", "authored", "build_parser",
            "parse_pose", "picture_path", "run", "snapshot"]
 
 DISPLAY_MODES = ("solid", "shaded", "parts", "xray", "hidden-line", "wireframe")
-DISPLAY_KEYS = frozenset({"mode", "grid", "appearance", "camera", "clip", "exploded", "hidden", "isolated"})
+DISPLAY_KEYS = frozenset({"mode", "grid", "appearance", "camera", "clip", "exploded", "hidden", "isolated", "pmi"})
 # What the viewer's hide and isolate leave out of a picture: each a list of part refs (``refs``), the
 # display object's and a Quick Edit packet's alike.
 VISIBILITY = ("hidden", "isolated")
@@ -177,10 +180,13 @@ def parse_display(value: str | None, grid: bool) -> dict[str, Any]:
                     display["mode"] = token
                 elif token in APPEARANCES and "appearance" not in display:
                     display["appearance"] = token
+                elif token in ("pmi", "pmi=on", "pmi=off") and "pmi" not in display:
+                    display["pmi"] = token != "pmi=off"
                 else:
                     raise SnapshotRefused(f"--display {token!r} is no display mode; the modes are {', '.join(DISPLAY_MODES)}, "
-                                          "exploded=AMOUNT moves the parts apart, and light or dark is the appearance "
-                                          "(all a drawing takes; one of each, by commas)")
+                                          "exploded=AMOUNT moves the parts apart, light or dark is the appearance "
+                                          "(all a drawing takes), and pmi or pmi=off draws the document's PMI or not "
+                                          "(one of each, by commas)")
     if "exploded" in display:
         display["exploded"] = _exploded(display["exploded"])
     unknown = sorted(set(display) - DISPLAY_KEYS)
@@ -191,6 +197,8 @@ def parse_display(value: str | None, grid: bool) -> dict[str, Any]:
         raise SnapshotRefused(f"display.mode {display['mode']!r} is no display mode; the modes are {', '.join(DISPLAY_MODES)}")
     if "grid" in display and not isinstance(display["grid"], bool):
         raise SnapshotRefused("display.grid is true or false")
+    if "pmi" in display and not isinstance(display["pmi"], bool):
+        raise SnapshotRefused("display.pmi is true or false")
     _visibility(display)
     if grid:
         display["grid"] = True
@@ -553,6 +561,28 @@ def refusals(still: Still, structure: dict[str, Any], name: str) -> None:
                               "Remove display.exploded.")
 
 
+def draws_pmi(still: Still, structure: dict[str, Any], name: str) -> bool:
+    """Whether the picture draws the document's PMI (``structure["pmi"]``, its manufacturing
+    annotations), as the viewer draws it: by default wherever the document carries any and its parts
+    stand as made -- not exploded, posed or in Preview, where the viewer draws none; ``display.pmi``
+    false draws none. Asked for (``display.pmi`` true) where it cannot be drawn, it is refused by
+    name, never quietly left out."""
+    asked = still.display.get("pmi")
+    if asked is False:
+        return False
+    carried = bool(structure.get("pmi"))
+    moved = [why for why, on in (("display.exploded", exploded_amount(still.display) > 0),
+                                 ("--pose", still.pose is not None), ("--preview", still.preview)) if on]
+    if asked is True:
+        if not carried:
+            raise SnapshotRefused(f"display.pmi draws a document's PMI; {name} carries none. Remove display.pmi.")
+        if moved:
+            raise SnapshotRefused(f"display.pmi draws the PMI on the parts as made; {' and '.join(moved)} "
+                                  f"{'moves or restages' if len(moved) == 1 else 'move or restage'} them. "
+                                  "Remove one or the other.")
+    return carried and not moved
+
+
 def stamp() -> str:
     """The time a generated picture name carries: UTC, to the second (``20261022T174512Z``)."""
     from datetime import datetime, timezone
@@ -745,6 +775,7 @@ def _occt(document: Path, out: Path, still: Still, daemon: bool, source: Any, st
 def _written(document: Path, out: Path, data: bytes, report: dict[str, Any], started: float) -> dict[str, Any]:
     """A picture drawn, written to ``out``: its warnings said, and what was drawn."""
     _warn(report.get("unmeshed") or {})
+    _warn_left_out(document, report.get("pmiLeftOut") or [])
     for warning in report.get("warnings") or []:
         print(f"warning: {document.name}: {warning}", file=sys.stderr)
     write_png(out, data)
@@ -992,6 +1023,15 @@ def _warn(unmeshed: dict[str, list[int]]) -> dict[str, list[int]]:
     return unmeshed
 
 
+def _warn_left_out(document: Path, left: list[dict[str, Any]]) -> None:
+    """A warning for each of the document's PMI the picture leaves out (``render/pmi.left_out``),
+    and why: its part's name first, the document's for one on no part; a broken one's status said."""
+    for item in left:
+        status = "" if item["status"] == "ok" else f" ({item['status']})"
+        print(f"warning: {item['part'] or document.name}: the picture does not draw PMI {item['id']}{status}: "
+              f"{item['reason']}", file=sys.stderr)
+
+
 def _arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.usage = "%(prog)s SRC OUT.png [options] | --job PACKET [SRC] [options]"
     parser.add_argument("document", metavar="SRC", nargs="?",
@@ -1008,8 +1048,9 @@ def _arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                              "dimensions, at its output settings (padding, tightFrame, transparent, renderScale, "
                              "sizeProfile); the other flags override every job")
     parser.add_argument("--display", help="a mode (solid, shaded, parts, xray, hidden-line, wireframe), exploded=AMOUNT "
-                                          "(the parts moved apart, 0 to 1; with a mode: hidden-line,exploded=0.6), or "
-                                          "the display JSON object (mode, grid, appearance, camera, clip, exploded, "
+                                          "(the parts moved apart, 0 to 1; with a mode: hidden-line,exploded=0.6), pmi=off "
+                                          "(a document's PMI not drawn; pmi or pmi=on asks for it), or "
+                                          "the display JSON object (mode, grid, appearance, camera, clip, exploded, pmi, "
                                           "hidden, isolated: part refs the picture leaves out, or alone draws), or "
                                           "a JSON file of it; a drawing takes appearance alone: light or dark, as the word "
                                           "or as {\"appearance\": ...}")

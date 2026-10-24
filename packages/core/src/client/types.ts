@@ -226,13 +226,22 @@ export interface CadActivity {
 
 export type ExportFormat = 'step' | 'glb' | 'stl' | 'threemf' | 'dxf' | 'xbf' | 'original';
 export interface ExportSource { doc: string; revision: string; part: string | null; pose: Record<string, number> | null }
-export interface ExportOption { format: ExportFormat; label: string; extension: string; reason: string | null }
+export interface ExportOption {
+  format: ExportFormat; label: string; extension: string; reason: string | null;
+  /**
+   * Whether the PMI decided the row: STEP's wherever the document carries PMI (which the export
+   * writes and checks in the file), XBF's where it is made again (a part, a converted document).
+   * With a `reason`, the format would not carry the PMI whole.
+   */
+  pmi?: boolean;
+}
 export interface ExportRequest { requestId: string; epoch: string; source: ExportSource; format: ExportFormat }
 export interface ExportJob {
   id: string; requestId: string; epoch: string; filename: string;
   state: 'queued' | 'running' | 'cancelling' | 'cancelled' | 'failed' | 'ready' | 'expired';
   stage: string; sequence: number; createdAt: number; finishedAt: number; expiresAt: number;
   bytes?: number; error?: string;
+  pmiVerification?: { matched: number; total: number; problems: string[]; sha256: string } | null;
 }
 export interface ExportService {
   options(source: ExportSource, signal: AbortSignal): Promise<{ epoch: string; formats: ExportOption[] }>;
